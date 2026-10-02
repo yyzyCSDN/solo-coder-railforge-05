@@ -16,6 +16,7 @@ from railforge.planning.train_path_engine import build, section_load, train_dela
 from railforge.routing.clearance import route_ok
 from railforge.signaling.block_occupancy import conflicts as block_conflicts
 from railforge.yard.hump import classify
+from railforge.yard.retrack import replan as retrack_replan, violations as retrack_violations
 from railforge.yard.switching import lock_route
 
 
@@ -62,6 +63,19 @@ class RailForgeFeatureService:
             locked = lock_route(route, switches, owner)
             return {"assignment": assignment, "switches": locked}
         return self.control.run(operation_id, "feature.yard.rebalance", operation_id, at, action)
+
+    def retrack_yard_dynamic(self, operation_id, cuts, tracks, current, hazard_conflicts, at):
+        def action():
+            plan = retrack_replan(cuts, tracks, current, hazard_conflicts)
+            if plan.status == "replanned":
+                bad = retrack_violations(plan.assignment, cuts, tracks, hazard_conflicts)
+                if bad:
+                    raise ValueError("retrack infeasible: " + ",".join(bad))
+            return {"status": plan.status, "assignment": plan.assignment, "moved": list(plan.moved),
+                    "swaps": [{"incoming": s.incoming, "displaced": s.displaced,
+                               "from_track": s.from_track, "to_track": s.to_track} for s in plan.swaps],
+                    "unplaced": list(plan.unplaced)}
+        return self.control.run(operation_id, "feature.yard.retracked", operation_id, at, action)
 
     def book_intermodal_chain(self, operation_id, inbound, candidates, unload, load, cutoff,
                               wagons, wagon_type, location, on, count, required_days, forbidden, at):

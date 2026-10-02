@@ -26,6 +26,7 @@ from railforge.storage.ops_store import VersionedStore
 from railforge.timetable.meets import conflicts as meet_conflicts
 from railforge.wagon.axle_load import route_ok as axle_route_ok
 from railforge.yard.hump import classify
+from railforge.yard.retrack import replan as retrack_replan
 from railforge.yard.switching import lock_route
 from railforge.crew.duty import legal as duty_legal
 
@@ -130,6 +131,10 @@ class RailForgeWorkflowControl:
     def classify_yard(self, operation_id, cuts, tracks, occupied, subject, at):
         return self._commit(operation_id, "yard.classified", subject, at,
                             lambda: classify(cuts, tracks, occupied))
+
+    def retrack_yard(self, operation_id, cuts, tracks, current, hazard_conflicts, subject, at):
+        return self._commit(operation_id, "yard.retracked", subject, at,
+                            lambda: retrack_replan(cuts, tracks, current, hazard_conflicts))
 
     def check_axles(self, operation_id, wagon, max_axle, max_gross, subject, at):
         return self._commit(operation_id, "wagon.axle.checked", subject, at,
