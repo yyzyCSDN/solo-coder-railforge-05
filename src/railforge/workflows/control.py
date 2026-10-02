@@ -23,6 +23,7 @@ from railforge.possession.windows import conflicts as possession_conflicts
 from railforge.routing.clearance import route_ok
 from railforge.signaling.block_occupancy import reserve
 from railforge.storage.ops_store import VersionedStore
+from railforge.core.versioning import VersionConflict
 from railforge.timetable.meets import conflicts as meet_conflicts
 from railforge.wagon.axle_load import route_ok as axle_route_ok
 from railforge.yard.hump import classify
@@ -74,18 +75,30 @@ class RailForgeWorkflowControl:
         return dict(self._receipts)
 
     def _commit(self, operation_id: str, topic: str, subject: str, at: datetime,
-                action: Callable[[], T], evidence: Mapping[str, Any] | None = None) -> OperationReceipt:
+                action: Callable[[], T], evidence: Mapping[str, Any] | None = None,
+                expected_version: int | None = None) -> OperationReceipt:
         previous = self._receipts.get(operation_id)
         if previous is not None:
             if previous.topic != topic or previous.subject != subject:
                 raise ValueError("operation id reused for a different workflow")
+            if expected_version is not None and previous.version != expected_version:
+                raise VersionConflict(
+                    f"operation={operation_id} expected={expected_version} committed={previous.version}")
             return previous
         result = action()
-        version = self.store.write(subject, _safe(result))
+        # The CAS write only succeeds if the subject is still at the caller's
+        # base version, so a failed commit publishes nothing and consumers
+        # never observe a version gap.
+        current = self.store.read(subject)
+        base_version = current.version if current else 0
+        if expected_version is not None and expected_version != base_version:
+            raise VersionConflict(f"subject={subject} expected={expected_version} actual={base_version}")
+        version = self.store.write(subject, _safe(result), expected_version)
         payload = {
             "operation_id": operation_id,
             "status": "committed",
             "control_path": "legacy" if topic in BROKEN_CONTROL_TOPICS else "atomic",
+            "base_version": base_version,
             "version": version,
             "result": _safe(result),
             **dict(evidence or {}),
@@ -97,8 +110,9 @@ class RailForgeWorkflowControl:
         return receipt
 
     def run(self, operation_id: str, topic: str, subject: str, at: datetime,
-            action: Callable[[], T], evidence: Mapping[str, Any] | None = None) -> OperationReceipt:
-        return self._commit(operation_id, topic, subject, at, action, evidence)
+            action: Callable[[], T], evidence: Mapping[str, Any] | None = None,
+            expected_version: int | None = None) -> OperationReceipt:
+        return self._commit(operation_id, topic, subject, at, action, evidence, expected_version)
 
     def reserve_block(self, operation_id, candidate, existing, clearance, at):
         return self._commit(operation_id, "dispatch.block.reserved", candidate.train, at,
@@ -175,6 +189,13 @@ class RailForgeWorkflowControl:
     def lock_switch_route(self, operation_id, route, switches, owner, subject, at):
         return self._commit(operation_id, "yard.route.locked", subject, at,
                             lambda: lock_route(route, switches, owner))
+
+    def rearrange_yard_tracks(self, operation_id, snapshot, requested, owner, subject, at,
+                              expected_version=None):
+        from railforge.yard.track_rearrangement import rearrange
+        return self._commit(operation_id, "yard.tracks.rearranged", subject, at,
+                            lambda: rearrange(snapshot, requested, owner),
+                            expected_version=expected_version)
 
     def check_clearance(self, operation_id, profile, segments, subject, at):
         return self._commit(operation_id, "routing.clearance.checked", subject, at,

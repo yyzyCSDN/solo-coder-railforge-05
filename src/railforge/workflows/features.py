@@ -17,6 +17,7 @@ from railforge.routing.clearance import route_ok
 from railforge.signaling.block_occupancy import conflicts as block_conflicts
 from railforge.yard.hump import classify
 from railforge.yard.switching import lock_route
+from railforge.yard.track_rearrangement import rearrange
 
 
 class RailForgeFeatureService:
@@ -62,6 +63,16 @@ class RailForgeFeatureService:
             locked = lock_route(route, switches, owner)
             return {"assignment": assignment, "switches": locked}
         return self.control.run(operation_id, "feature.yard.rebalance", operation_id, at, action)
+
+    def reassign_yard_tracks(self, operation_id, snapshot, requested, owner, at, expected_version=None):
+        """Dynamically reallocate cuts under hazmat, capacity, switch-lock and
+        existing-placement constraints; local swaps are preferred to a full
+        order rollback. Committed through a single CAS-guarded event so event
+        consumers observe one contiguous version sequence per yard."""
+        subject = "yard:" + owner
+        return self.control.run(operation_id, "feature.yard.tracks.reassigned", subject, at,
+                                lambda: rearrange(snapshot, requested, owner),
+                                expected_version=expected_version)
 
     def book_intermodal_chain(self, operation_id, inbound, candidates, unload, load, cutoff,
                               wagons, wagon_type, location, on, count, required_days, forbidden, at):
